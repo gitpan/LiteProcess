@@ -40,7 +40,7 @@ our %SUPPORTED_SIGNALS ;
 my $errno;
 
 BEGIN {
-	$LiteProcess::VERSION = '0.01';
+	$LiteProcess::VERSION = '0.02';
 	%LiteProcess::SUPPORTED_SIGNALS = (
 		SIGHUP    => 1,
 		SIGINT    => 2,
@@ -79,10 +79,8 @@ BEGIN {
 sub new() {
 	my $class = shift;
 	$class = ref($class) if ref($class);
-	my ($_self) = new IO::Pty;
-	die "$class: Could not assign a pty" unless $_self;
+	my ($_self) = {};
 	bless $_self => $class;
-	$_self->autoflush(1);
 	return $_self;
 }
 
@@ -95,6 +93,7 @@ sub createProcess() {
 	else {
 	       $_this = $class->new();
 	}
+	my $tmpTTY = new IO::Pty;
 	my $_signal = shift or return -1;
 	my $_cmd;
 	if ( !exists $SUPPORTED_SIGNALS{$_signal} ) {
@@ -106,12 +105,20 @@ sub createProcess() {
 	}
 	my @_args = @_;
 	my $_pid  = undef;
+	$_cmd = "$_cmd ".join (" ",@_args);
 
 	# set up pipe to detect childs exec error
-	pipe(STDRDR, STDWTR) or die "Cannot open pipe: $!";
-	STDWTR->autoflush(1);
+	pipe(FROM_CHILD, TO_PARENT) or die "Cannot open pipe: $!";
+	pipe(FROM_PARENT, TO_CHILD) or die "Cannot open pipe: $!";
+	TO_PARENT->autoflush(1);
+	TO_CHILD->autoflush(1);
+	eval {
+		fcntl(TO_PARENT, Fcntl::F_SETFD, Fcntl::FD_CLOEXEC);
+	};
+	#pipe(STDRDR, STDWTR) or die "Cannot open pipe: $!";
+	#STDWTR->autoflush(1);
 
-	$_pid = fork();
+	$_pid = fork;
 	unless (defined ($_pid)) {
 		warn "Cannot fork: $!";
 		return undef;
@@ -119,38 +126,47 @@ sub createProcess() {
 
 	unless ($_pid) {
 		#CHILD PROCESS SPACE
-		close STDRDR;
-		$_this->make_slave_controlling_terminal();
-		my $slv = $_this->slave();
-		close($_this);
+		close FROM_CHILD;
+		close TO_CHILD;
+		$tmpTTY->make_slave_controlling_terminal();
+		my $slv = $tmpTTY->slave();
+		close($tmpTTY);
 		$slv->set_raw();
 
 		# wait for parent before we detach
+		my $buffer;
+		my $errstatus = sysread(FROM_PARENT, $buffer, 256);
+		die "Cannot sync with parent: $!" if not defined $errstatus;
+		close FROM_PARENT;
+
 		open(STDIN,"<&". $slv->fileno()) or die "Couldn't reopen STDIN for reading, $!\n";
 		open(STDOUT,">&". $slv->fileno()) or die "Couldn't reopen STDOUT for writing, $!\n";
 		open(STDERR,">&". $slv->fileno()) or die "Couldn't reopen STDERR for writing, $!\n";
 		close $slv;
-		{exec( "$_cmd", @_args ) };
-		print STDWTR $!+0;
+		{ exec( "$_cmd" ) };
+		print TO_PARENT $!+0;
 		die("Cannot exec($_cmd): $!\n");
 	}
 	#PARENT PROCESS SPACE
-	close STDWTR;
-	$_this->close_slave();
-	$_this->set_raw();
+	close TO_PARENT;
+	close FROM_PARENT;
+	$tmpTTY->close_slave();
+	$tmpTTY->set_raw();
+	close TO_CHILD; # SO CHILD GETS EOF AND CAN GO AHEAD
 
 	# NOW WAIT FOR CHILD EXEC (EOF DUE TO CLOSE-ON-EXIT) OR EXEC ERROR
-	my $errstatus = sysread(STDRDR, $errno, 256);
+	my $errstatus = sysread(FROM_CHILD, $errno, 256);
 	die "Cannot sync with child: $!" if not defined $errstatus;
-	close STDRDR; # SO CHILD GETS EOF AND CAN GO AHEAD
+	close FROM_CHILD; # SO CHILD GETS EOF AND CAN GO AHEAD
 
 	if ($errstatus) {
 		$! = $errno+0;
-		die "Cannot exec(\"$_cmd\"): $!";
+		warn "Cannot exec(\"$_cmd\"): $!";
+		return undef;
 	}
 
 	if ( kill( "$_signal", $_pid ) == 1 ) {
-		${*$_this}{STATUS}->{$_pid} = 0;
+		$_this->{STATUS}->{$_pid} = undef;
 	}
 	return $_pid;
 }
@@ -175,42 +191,43 @@ sub run() {
 
 sub runAll() {
 	my $_this = shift;
-	foreach ( keys %{ ${*_this}{STATUS} } ) {
+	foreach ( keys %{ $_this->{STATUS} } ) {
 		return 111 if !kill( "SIGCONT", $_ ) == 1;
 	}
-	return keys %{ ${*$_this}{STATUS} };
+	return keys %{ $_this->{STATUS} };
 }
 
 sub getAllChildProcesses() {
 	my $_this = shift;
-	return keys( %{ ${*$_this}{STATUS} } );
+	return keys( %{ $_this->{STATUS} } );
 }
 
 sub getProcessStatus() {
 	my $_this   = shift;
-	my @_pids   = @_ || keys( %{ ${*$_this}{STATUS} });
+	my @_pids   = @_ || keys( %{ $_this->{STATUS} });
 	my %_status;
 
 	foreach (@_pids) {
-		$_status{$_} = ${*$_this}{STATUS}->{$_};
+		$_status{$_} = $_this->{STATUS}->{$_};
 	}
 	return %_status;
 }
 
 sub waitForAll() {
 	my $_this   = shift;
-	while (wait()!=-1) {
-		${*$_this}{STATUS}->{$_} = $? >> 8;
+	my $retPid;
+	while (($retPid=wait())!=-1) {
+		$_this->{STATUS}->{$retPid} = $? >> 8;
 	}
-	return %{ ${*$_this}{STATUS} };
+	return %{ $_this->{STATUS} };
 }
 
 sub waitFor() {
 	my $_this  = shift;
 	my $_pid   = shift;
 	my $retPid = waitpid( $_pid, 0 );
-	${*$_this}{STATUS}->{$retPid} = $? >> 8;
-	return ${*$_this}{STATUS};
+	$_this->{STATUS}->{$retPid} = $? >> 8;
+	return $_this->{STATUS};
 }
 
 sub AUTOLOAD {

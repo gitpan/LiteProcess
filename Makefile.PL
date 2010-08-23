@@ -5,10 +5,13 @@ use ExtUtils::MakeMaker;
 WriteMakefile(
     NAME              => 'LiteProcess',
     VERSION_FROM      => 'lib/LiteProcess.pm', # finds $VERSION
-    PREREQ_PM         => {}, # e.g., Module::Name => 1.1
+    PREREQ_PM         => {
+    				'IO::Tty'	=> '1.03'
+    				'IO::Pty'	=> '1.03'
+    			 }, # e.g., Module::Name => 1.1
     ($] >= 5.005 ?     ## Add these new keywords supported since 5.005
       (ABSTRACT_FROM  => 'lib/LiteProcess.pm', # retrieve abstract from module
-       AUTHOR         => 'A. U. Thor <KM43415149@suse.de>') : ()),
+       AUTHOR         => 'Kamal Mehta <kamal.h.mehta@gmail.com>') : ()),
     LIBS              => [''], # e.g., '-lm'
     DEFINE            => '', # e.g., '-DHAVE_SOMETHING'
     INC               => '-I.', # e.g., '-I. -I/usr/include/other'
